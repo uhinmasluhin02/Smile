@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foto Wajah Otomatis</title>
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/dist/face-api.js"></script>
+<style>
+  :root{--bg:#0f1419;--card:#1a212b;--text:#e8edf2;--muted:#8b98a7;--accent:#34d399;--warn:#fbbf24}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);padding:20px}
+  h1{margin:0 0 4px;font-size:1.5rem}
+  .sub{color:var(--muted);margin:0 0 18px;font-size:.95rem}
+  .wrap{max-width:1100px;margin:auto}
+  .cam{position:relative;background:#000;border-radius:14px;overflow:hidden;max-width:640px;margin:auto;aspect-ratio:4/3}
+  video,canvas.ov{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  .count{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:9rem;font-weight:700;color:#fff;text-shadow:0 4px 24px rgba(0,0,0,.7);pointer-events:none}
+  .flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .4s}
+  .status{text-align:center;margin:12px 0 26px;font-weight:600}
+  .status.ok{color:var(--accent)} .status.wait{color:var(--warn)}
+  .head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+  .head h2{margin:0;font-size:1.15rem}
+  button{background:var(--card);color:var(--text);border:1px solid #2c3746;border-radius:8px;padding:7px 12px;cursor:pointer;font-size:.85rem}
+  button:hover{border-color:var(--accent)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+  .item{background:var(--card);border-radius:10px;overflow:hidden}
+  .item img{width:100%;aspect-ratio:1;object-fit:cover;display:block}
+  .meta{padding:8px;font-size:.75rem;color:var(--muted)}
+  .acts{display:flex;gap:6px;margin-top:6px}
+  .acts button{flex:1;padding:4px;font-size:.75rem}
+  .empty{color:var(--muted);text-align:center;padding:30px;grid-column:1/-1}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📸 Foto Wajah Otomatis</h1>
+  <p class="sub">Arahkan wajah ke kamera. Setelah terdeteksi, hitung mundur 5 detik lalu foto diambil otomatis dan disimpan di galeri.</p>
+
+  <div class="cam">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="ov" class="ov"></canvas>
+    <div class="count" id="count"></div>
+    <div class="flash" id="flash"></div>
+  </div>
+  <div class="status wait" id="status">Menyiapkan kamera…</div>
+  <div style="text-align:center;margin:-12px 0 20px"><button id="startBtn" style="display:none;padding:10px 18px;font-size:1rem;border-color:var(--accent)">📷 Nyalakan Kamera</button></div>
+
+  <div class="head">
+    <h2>Galeri (<span id="total">0</span>)</h2>
+    <button id="clear">Hapus semua</button>
+  </div>
+  <div class="grid" id="grid"></div>
+</div>
+
+<script>
+const COUNTDOWN = 5;          // detik
+const COOLDOWN = 3000;        // jeda setelah foto (ms)
+const LOST_GRACE = 600;       // toleransi wajah hilang sesaat (ms)
+const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/';
+
+const video = document.getElementById('video');
+const ov = document.getElementById('ov');
+const countEl = document.getElementById('count');
+const statusEl = document.getElementById('status');
+const flash = document.getElementById('flash');
+const grid = document.getElementById('grid');
+
+/* ---------- Penyimpanan (IndexedDB) ---------- */
+let db;
+function openDB(){
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('foto-wajah', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('photos', {keyPath:'id', autoIncrement:true});
+    r.onsuccess = () => { db = r.result; res(); };
+    r.onerror = () => rej(r.error);
+  });
+}
+const store = mode => db.transaction('photos', mode).objectStore('photos');
+const dbAll = () => new Promise(r => { const q = store('readonly').getAll(); q.onsuccess = () => r(q.result); });
+const dbAdd = item => new Promise(r => { const q = store('readwrite').add(item); q.onsuccess = () => r(); });
+const dbDel = id => new Promise(r => { const q = store('readwrite').delete(id); q.onsuccess = () => r(); });
+const dbClear = () => new Promise(r => { const q = store('readwrite').clear(); q.onsuccess = () => r(); });
+
+async function renderGallery(){
+  const items = (await dbAll()).reverse();
+  document.getElementById('total').textContent = items.length;
+  grid.innerHTML = '';
+  if(!items.length){ grid.innerHTML = '<div class="empty">Belum ada foto.</div>'; return; }
+  for(const it of items){
+    const d = document.createElement('div');
+    d.className = 'item';
+    d.innerHTML = `<img src="${it.data}" alt="Wajah"><div class="meta">${new Date(it.time).toLocaleString('id-ID')}
+      <div class="acts"><button data-dl>Unduh</button><button data-del>Hapus</button></div></div>`;
+    d.querySelector('[data-dl]').onclick = () => {
+      const a = document.createElement('a'); a.href = it.data; a.download = `wajah-${it.id}.jpg`; a.click();
+    };
+    d.querySelector('[data-del]').onclick = async () => { await dbDel(it.id); renderGallery(); };
+    grid.appendChild(d);
+  }
+}
+document.getElementById('clear').onclick = async () => {
+  if(confirm('Hapus semua foto?')){ await dbClear(); renderGallery(); }
+};
+
+/* ---------- Ambil foto ---------- */
+function capture(detections){
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const c = document.createElement('canvas');
+  const promises = [];
+  for(const d of detections){
+    const b = d.box, pad = 0.35;
+    const x = Math.max(0, b.x - b.width*pad), y = Math.max(0, b.y - b.height*pad);
+    const w = Math.min(vw - x, b.width*(1+2*pad)), h = Math.min(vh - y, b.height*(1+2*pad));
+    c.width = 400; c.height = Math.round(400*h/w);
+    c.getContext('2d').drawImage(video, x, y, w, h, 0, 0, c.width, c.height);
+    promises.push(dbAdd({data: c.toDataURL('image/jpeg', .9), time: Date.now()}));
+  }
+  flash.style.opacity = 1; setTimeout(() => flash.style.opacity = 0, 150);
+  Promise.all(promises).then(renderGallery);
+}
+
+/* ---------- Deteksi + hitung mundur ---------- */
+let faceSince = null, lastSeen = 0, cooldownUntil = 0;
+
+function setStatus(t, cls){ statusEl.textContent = t; statusEl.className = 'status ' + cls; }
+
+async function loop(){
+  const now = Date.now();
+  const opts = new faceapi.TinyFaceDetectorOptions({inputSize: 320, scoreThreshold: 0.5});
+  const dets = (await faceapi.detectAllFaces(video, opts)).map(d => d.box ? d : d.detection || d);
+
+  // gambar kotak
+  ov.width = video.videoWidth; ov.height = video.videoHeight;
+  const g = ov.getContext('2d');
+  g.clearRect(0, 0, ov.width, ov.height);
+  g.strokeStyle = '#34d399'; g.lineWidth = 4;
+  dets.forEach(d => g.strokeRect(d.box.x, d.box.y, d.box.width, d.box.height));
+
+  if(now < cooldownUntil){
+    countEl.textContent = '';
+    setStatus('✅ Foto tersimpan! Bersiap untuk foto berikutnya…', 'ok');
+  } else if(dets.length){
+    lastSeen = now;
+    if(!faceSince) faceSince = now;
+    const left = COUNTDOWN - (now - faceSince)/1000;
+    if(left <= 0){
+      capture(dets);
+      faceSince = null; cooldownUntil = now + COOLDOWN; countEl.textContent = '';
+    } else {
+      countEl.textContent = Math.ceil(left);
+      setStatus(`Wajah terdeteksi (${dets.length}) — tahan posisi…`, 'ok');
+    }
+  } else {
+    if(faceSince && now - lastSeen > LOST_GRACE) faceSince = null;
+    if(!faceSince){ countEl.textContent = ''; setStatus('Menunggu wajah di depan kamera…', 'wait'); }
+  }
+  setTimeout(loop, 120);
+}
+
+/* ---------- Mulai ---------- */
+let started = false;
+async function startCamera(){
+  if(started) return;
+  const btn = document.getElementById('startBtn');
+  btn.style.display = 'none';
+  try{
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+      throw {name:'NoAPI'};
+    setStatus('Meminta izin kamera… klik "Izinkan" pada pop-up browser.', 'wait');
+    const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'user'}, audio:false});
+    video.srcObject = stream;
+    await video.play().catch(()=>{});
+    await new Promise(r => video.videoWidth ? r() : video.onloadedmetadata = r);
+    started = true;
+  }catch(e){
+    btn.style.display = 'inline-block';
+    const msg = {
+      NotAllowedError:'Izin kamera ditolak. Klik ikon gembok/kamera di address bar, pilih Izinkan, lalu klik tombol di bawah.',
+      PermissionDeniedError:'Izin kamera ditolak. Aktifkan izin kamera di pengaturan browser.',
+      NotFoundError:'Kamera tidak ditemukan di perangkat ini.',
+      NotReadableError:'Kamera sedang dipakai aplikasi lain (Zoom, Meet, dll). Tutup dulu lalu coba lagi.',
+      NoAPI:'Browser memblokir kamera. Buka lewat https:// atau localhost (bukan dari pratinjau/iframe).'
+    }[e.name] || ('Gagal membuka kamera: ' + (e.message || e.name));
+    setStatus(msg, 'wait');
+    return;
+  }
+  try{
+    setStatus('Memuat model deteksi wajah…', 'wait');
+    await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+  }catch(e){
+    setStatus('Kamera menyala, tapi model deteksi gagal dimuat. Periksa koneksi internet lalu refresh.', 'wait');
+    return;
+  }
+  setStatus('Menunggu wajah di depan kamera…', 'wait');
+  loop();
+}
+document.getElementById('startBtn').onclick = startCamera;
+(async function init(){
+  try{ await openDB(); renderGallery(); }catch(e){}
+  startCamera();
+})();
+</script>
+</body>
+</html>
